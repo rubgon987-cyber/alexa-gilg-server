@@ -1,6 +1,6 @@
+require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const crypto = require('crypto');
 const axios = require('axios');
 
 const app = express();
