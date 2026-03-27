@@ -11,50 +11,49 @@ const OPENCLAW_GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || 'http://localho
 const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN || '737ca5044c75151e455072bd547a82e3bfc11b645fc4ef5d';
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '1809345608';
 
-// Middleware
-app.use(bodyParser.json());
-
-// Alexa Skill ID - validate requests
+// Alexa Skill ID
 const SKILL_ID = 'amzn1.ask.skill.745346a7-0352-498b-828d-8897ffeeb3e9';
 
-// Verify Alexa request signature (simplified for Hostinger)
-function verifyAlexaRequest(req) {
-    // In production, verify the signature certificate URL and signature
-    // For simplicity, we check the skill ID in the request
-    const requestBody = req.body;
-    if (requestBody.session && requestBody.session.application) {
-        return requestBody.session.application.applicationId === SKILL_ID;
-    }
-    // Allow for testing
-    return true;
-}
+// Middleware - log all incoming requests
+app.use(bodyParser.json());
+
+app.use((req, res, next) => {
+    console.log(`\n[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    console.log('Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+    next();
+});
 
 // Build Alexa speech response
-function buildSpeechResponse(speechText, shouldEndSession = true, repromptText = null) {
-    return {
+function buildResponse(speechText, shouldEndSession = true, repromptText = null) {
+    const response = {
         version: '1.0',
         response: {
             outputSpeech: {
                 type: 'PlainText',
                 text: speechText
             },
-            shouldEndSession: shouldEndSession,
-            ...(repromptText && {
-                reprompt: {
-                    outputSpeech: {
-                        type: 'PlainText',
-                        text: repromptText
-                    }
-                }
-            })
+            shouldEndSession: shouldEndSession
         }
     };
+    
+    if (repromptText) {
+        response.response.reprompt = {
+            outputSpeech: {
+                type: 'PlainText',
+                text: repromptText
+            }
+        };
+    }
+    
+    console.log('Sending response:', JSON.stringify(response, null, 2));
+    return response;
 }
 
-// Send message to OpenClaw (which forwards to Telegram)
-async function sendMessageToGilg(message) {
+// Send message to Telegram via OpenClaw
+async function sendToTelegram(message) {
     try {
-        // Send to OpenClaw Gateway which will route to Telegram
+        console.log(`Sending to Telegram: ${message}`);
         const response = await axios.post(`${OPENCLAW_GATEWAY_URL}/api/send`, {
             chat_id: TELEGRAM_CHAT_ID,
             text: `🎤 [Desde Alexa] ${message}`
@@ -62,115 +61,141 @@ async function sendMessageToGilg(message) {
             headers: {
                 'Authorization': `Bearer ${OPENCLAW_TOKEN}`,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 5000
         });
+        console.log('Telegram response:', response.status);
         return true;
     } catch (error) {
-        console.error('Error sending to OpenClaw:', error.message);
-        // Fallback: just log it
-        console.log(`Message to Gilg: ${message}`);
-        return true;
+        console.error('Error sending to Telegram:', error.message);
+        return false;
     }
 }
 
-// Health check endpoint
+// Health check
 app.get('/', (req, res) => {
     res.json({ 
         status: 'ok', 
         service: 'Alexa Gilg Server',
-        skillId: SKILL_ID 
+        skillId: SKILL_ID,
+        timestamp: new Date().toISOString()
     });
 });
 
 app.get('/health', (req, res) => {
-    res.json({ status: 'healthy' });
+    res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Main Alexa endpoint
+// Alexa endpoint
 app.post('/', async (req, res) => {
-    console.log('Received Alexa request:', JSON.stringify(req.body, null, 2));
-
-    if (!verifyAlexaRequest(req)) {
-        return res.status(403).json({ error: 'Invalid request' });
-    }
-
-    const requestBody = req.body;
-    const requestType = requestBody.request.type;
-    const intent = requestBody.request.intent;
-
-    // Handle different request types
-    switch (requestType) {
-        case 'LaunchRequest':
-            // User said "Alexa, open Gilg"
-            return res.json(buildSpeechResponse(
-                'Hola, soy Gilg. ¿Qué necesitas? Dime tu mensaje y lo enviaré.',
+    try {
+        const body = req.body;
+        
+        // Validate request structure
+        if (!body || !body.request) {
+            console.error('Invalid request structure');
+            return res.json(buildResponse('Solicitud inválida.', true));
+        }
+        
+        const request = body.request;
+        const requestType = request.type;
+        const session = body.session || {};
+        
+        console.log(`Request type: ${requestType}`);
+        console.log(`Session new: ${session.new}`);
+        
+        // Handle Launch Request (user says "Alexa, open Gilg")
+        if (requestType === 'LaunchRequest') {
+            return res.json(buildResponse(
+                'Hola, soy Gilg. ¿Qué mensaje quieres enviar?',
                 false,
                 'Dime tu mensaje para Gilg.'
             ));
-
-        case 'IntentRequest':
-            // Handle intents
-            if (intent) {
-                switch (intent.name) {
-                    case 'SendMessageIntent':
-                        const message = intent.slots && intent.slots.message ? intent.slots.message.value : '';
-                        
-                        if (message) {
-                            // Send to OpenClaw/Telegram
-                            await sendMessageToGilg(message);
-                            
-                            return res.json(buildSpeechResponse(
-                                `Mensaje enviado: ${message}. Gilg lo recibirá en Telegram.`,
-                                true
-                            ));
-                        } else {
-                            return res.json(buildSpeechResponse(
-                                'No entendí el mensaje. Por favor, repítelo.',
-                                false,
-                                '¿Qué mensaje quieres enviar a Gilg?'
-                            ));
-                        }
-
-                    case 'AMAZON.HelpIntent':
-                        return res.json(buildSpeechResponse(
-                            'Puedes decir: dile a Gilg, seguido de tu mensaje. Por ejemplo: dile a Gilg que revise mi calendario.',
-                            false,
-                            '¿Qué necesitas enviar a Gilg?'
-                        ));
-
-                    case 'AMAZON.CancelIntent':
-                    case 'AMAZON.StopIntent':
-                        return res.json(buildSpeechResponse(
-                            'Hasta luego.',
+        }
+        
+        // Handle Intent Request
+        if (requestType === 'IntentRequest') {
+            const intent = request.intent;
+            
+            if (!intent || !intent.name) {
+                console.error('No intent found');
+                return res.json(buildResponse('No entendí eso. Intenta de nuevo.', false));
+            }
+            
+            console.log(`Intent: ${intent.name}`);
+            
+            switch (intent.name) {
+                case 'SendMessageIntent':
+                    const message = intent.slots?.message?.value || '';
+                    console.log(`Message slot: "${message}"`);
+                    
+                    if (message && message.trim()) {
+                        await sendToTelegram(message.trim());
+                        return res.json(buildResponse(
+                            `Listo. Envié: ${message}.`,
                             true
                         ));
-
-                    default:
-                        return res.json(buildSpeechResponse(
-                            'No entendí eso. Intenta decir: dile a Gilg, y tu mensaje.',
-                            false
+                    } else {
+                        return res.json(buildResponse(
+                            'No escuché ningún mensaje. Repite por favor.',
+                            false,
+                            '¿Qué quieres enviar a Gilg?'
                         ));
-                }
+                    }
+                
+                case 'AMAZON.HelpIntent':
+                    return res.json(buildResponse(
+                        'Di: dile a Gilg, seguido de tu mensaje. Por ejemplo: dile a Gilg que estoy ocupado.',
+                        false,
+                        '¿Qué mensaje quieres enviar?'
+                    ));
+                
+                case 'AMAZON.CancelIntent':
+                case 'AMAZON.StopIntent':
+                    return res.json(buildResponse('Hasta luego.', true));
+                
+                case 'AMAZON.FallbackIntent':
+                    return res.json(buildResponse(
+                        'No entendí eso. Di: dile a Gilg, y tu mensaje.',
+                        false,
+                        '¿Qué quieres enviar a Gilg?'
+                    ));
+                
+                default:
+                    console.log(`Unknown intent: ${intent.name}`);
+                    return res.json(buildResponse(
+                        'No reconocí ese comando.',
+                        false
+                    ));
             }
-            break;
-
-        case 'SessionEndedRequest':
-            // Session ended
+        }
+        
+        // Handle Session Ended
+        if (requestType === 'SessionEndedRequest') {
+            console.log('Session ended');
             return res.json({ version: '1.0', response: {} });
-
-        default:
-            return res.json(buildSpeechResponse(
-                'No pude procesar esa solicitud.',
-                true
-            ));
+        }
+        
+        // Unknown request type
+        console.log(`Unknown request type: ${requestType}`);
+        return res.json(buildResponse('No pude procesar eso.', true));
+        
+    } catch (error) {
+        console.error('Error processing request:', error);
+        return res.json(buildResponse('Hubo un error. Intenta de nuevo.', true));
     }
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Alexa Gilg Server running on port ${PORT}`);
-    console.log(`📋 Skill ID: ${SKILL_ID}`);
-    console.log(`🔗 OpenClaw Gateway: ${OPENCLAW_GATEWAY_URL}`);
+    console.log('═══════════════════════════════════════');
+    console.log('🚀 Alexa Gilg Server STARTED');
+    console.log('═══════════════════════════════════════');
+    console.log(`Port: ${PORT}`);
+    console.log(`Skill ID: ${SKILL_ID}`);
+    console.log(`OpenClaw Gateway: ${OPENCLAW_GATEWAY_URL}`);
+    console.log(`Telegram Chat ID: ${TELEGRAM_CHAT_ID}`);
+    console.log('═══════════════════════════════════════');
 });
 
 module.exports = app;
